@@ -1,0 +1,24 @@
+alerts:
+  - name: "Studio Availability"
+    start_date: "2025-04-01"
+    end_date: "2025-04-07"
+    room_type: "Studio"
+    exclude_non_wdw: true
+    resort_names:
+      - "Animal Kingdom"
+      - "Bay Lake Tower"
+    pushover:
+      user_key: "your_pushover_user_key"
+      api_token: "your_pushover_api_token"
+
+  - name: "1-Bedroom Availability"
+    start_date: "2025-04-01"
+    end_date: "2025-04-07"
+    room_type: "1-Bedroom"
+    exclude_non_wdw: false
+    resort_names:
+      - "Grand Floridian"
+      - "Polynesian"
+    pushover:
+      user_key: "another_pushover_user_key"
+      api_token: "another_pushover_api_token"

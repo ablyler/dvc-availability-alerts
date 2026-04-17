@@ -8,7 +8,10 @@ import argparse
 import yaml
 import time
 import sqlite3
+from functools import lru_cache
 from pushover import Client
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 BASE_URL = "https://api.keyholdervacations.com/v2/dvc"
 HEADERS = {
@@ -24,6 +27,9 @@ HEADERS = {
 
 NON_WDW_RESORT_CODES = {"AULV", "HILTN", "VERO", "GCAL", "VDH"}
 DEFAULT_LEVELS = {"high", "low"}
+HTTP_TIMEOUT = (10, 30)
+HTTP_RETRY_COUNT = 2
+RETRYABLE_STATUS_CODES = (429, 500, 502, 503, 504)
 
 LEVEL_LABELS = {
     "high": "Available",
@@ -39,6 +45,27 @@ CHANGE_LABELS = {
 }
 
 LEVEL_ORDER = ["high", "low", "partial"]
+
+
+def build_session():
+    retry = Retry(
+        total=HTTP_RETRY_COUNT,
+        connect=HTTP_RETRY_COUNT,
+        read=HTTP_RETRY_COUNT,
+        status=HTTP_RETRY_COUNT,
+        backoff_factor=1,
+        status_forcelist=RETRYABLE_STATUS_CODES,
+        allowed_methods=frozenset({"GET"}),
+        raise_on_status=False,
+    )
+    adapter = HTTPAdapter(max_retries=retry)
+    session = requests.Session()
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    return session
+
+
+SESSION = build_session()
 
 
 def initialize_db(db_path="alerts.db"):
@@ -76,10 +103,20 @@ def update_last_result(conn, alert_name, result_dict):
     conn.commit()
 
 
-def fetch_room_metadata():
-    response = requests.get(f"{BASE_URL}/rooms", params={"occupancy": 1}, headers=HEADERS)
+def fetch_json(path, params):
+    response = SESSION.get(
+        f"{BASE_URL}{path}",
+        params=params,
+        headers=HEADERS,
+        timeout=HTTP_TIMEOUT,
+    )
     response.raise_for_status()
-    data = response.json()["data"]
+    return response.json()["data"]
+
+
+@lru_cache(maxsize=1)
+def fetch_room_metadata():
+    data = fetch_json("/rooms", {"occupancy": 1})
 
     views = {v["id"]: v["description"] for v in data["views"].values()}
     types = {v["id"]: v["description"] for v in data["types"].values()}
@@ -106,17 +143,16 @@ def fetch_resort_info(start_date, end_date, availability_levels, room_type_filte
     except ValueError:
         return "Invalid date format. Please use YYYY-mm-dd."
 
-    avail_response = requests.get(
-        f"{BASE_URL}/availability/calendar",
-        params={"startDate": start_date, "endDate": end_date},
-        headers=HEADERS,
-    )
-
-    if avail_response.status_code != 200:
-        return f"Error fetching data: {avail_response.status_code}"
-
-    avail_data = avail_response.json()["data"]
-    key_to_meta = fetch_room_metadata()
+    try:
+        avail_data = fetch_json(
+            "/availability/calendar",
+            {"startDate": start_date, "endDate": end_date},
+        )
+        key_to_meta = fetch_room_metadata()
+    except requests.Timeout:
+        return "Timed out fetching data from Keyholder Vacations."
+    except requests.RequestException as exc:
+        return f"Error fetching data from Keyholder Vacations: {exc}"
 
     resorts = []
     for avail_key, avail_info in avail_data.items():
@@ -258,7 +294,11 @@ def main():
     while True:
         print(f"Checking availability at {datetime.now()}...")
         for alert_config in config.get("alerts", []):
-            check_availability(conn, alert_config)
+            alert_name = alert_config.get("name", "Unnamed")
+            try:
+                check_availability(conn, alert_config)
+            except Exception as exc:
+                print(f"Unexpected error checking '{alert_name}': {exc}")
         time.sleep(300)
 
 
